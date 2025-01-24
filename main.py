@@ -44,7 +44,7 @@ area  = Setup.loc["area",:][0]
 
 # Call the functions
 TimeSeries = EDS_caller().run_EDS(DateStart, DateEnd, area, DSO, Connection_type)
-TimeSeries = Heat_input(TimeSeries,list(TimeSeries.index))
+TimeSeries = Heat_input(DateStart,DateEnd, TimeSeries)
 
 wb.sheets['TimeSeries'].range('A1').value = TimeSeries
 
@@ -63,7 +63,7 @@ end             = len(tLoop)
 # Creating Unit data
 for u in uSet:    
     pqlData[u]  = PQL_builder(wb.sheets[u].range('J1').options(pd.DataFrame, expand='table').value,tSet)
-    TimeSeries[u] = 1
+    TimeSeries[u] = TimeSeries['cop_factor'] if u == "HP" else 1
     
 # Max solve time (min)
 maxTime= int(Main.Input.MaxTime)

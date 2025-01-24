@@ -49,14 +49,141 @@ def linear_regression(subset, x_col, y_col):
     return a, b
 
 
-def Heat_input(TimeSeries,tSet): 
+def Heat_input(DateStart,DateEnd,TimeSeries): 
     
-    TimeSeries['Heat_Demand'] = 9 
     
-    for t in tSet:
-        TimeSeries.loc[t,'Heat_Demand'] = 9   
+    # Function for forecast
+    def fetch_temperature_forecast(DateStart,DateEnd):
+    
+        # Convert DateStart and DateEnd to datetime objects
+        start_date = datetime.strptime(DateStart, "%Y-%m-%d %H:%M:%S")
+        end_date = datetime.strptime(DateEnd, "%Y-%m-%d %H:%M:%S")
+        
+        # Add 3 days to the end date using timedelta
+        new_end_date = end_date + timedelta(days=3)
+        
+        # Convert both dates to ISO 8601 format with 'Z' for UTC
+        start_date_iso = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        new_end_date_iso = new_end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        # Construct the datetime parameter
+        datetime_param = f"{start_date_iso}/{new_end_date_iso}"
+            
+            
+        api_key = '7f560113-d22b-4798-8803-4ffdfe8d148d' 
+        
+         
+        # Define the API endpoint and query parameters
+        url = 'https://dmigw.govcloud.dk/v1/forecastedr/collections/harmonie_dini_sf/position'
+        params = {
+            'coords': 'POINT(9.4725 55.4969)',  # Coordinates in WKT format
+            'crs': 'crs84',                   # Coordinate reference system
+            'parameter-name': 'temperature-0m',  # Parameter to fetch
+            'f': 'GeoJSON',                   # Response format
+            'datetime':datetime_param, # Example'2025-01-12T00:00:00Z/2025-02-18T00:00:00Z',
+            'api-key': api_key                # API key
+        }
+        
+        # Send a GET request to the API
+        response = requests.get(url, params=params)
+        data = response.json()
+        
+        features = data.get('features', [])
+        
+        # Create a DataFrame from the features
+        data_temp = pd.DataFrame([
+             {'timestamp': feature['properties']['step'],  # Timestamp
+             'temperature': feature['properties']['temperature-0m']   # Temperature value
+             }
+             for feature in features
+         ])
+        
+        
+        # Convert timestamp to datetime 
+        data_temp['timestamp'] = pd.to_datetime(data_temp['timestamp']).dt.tz_convert('CET')
+        data_temp['timestamp'] = data_temp['timestamp'].dt.tz_localize(None)
+        
+        
+        # Convert temperature from Kelvin to Celsius
+        data_temp['temperature'] = data_temp['temperature'] - 273.15
+        
+        return data_temp
+    
+    #Function for actual temperature
+    def fetch_temperature(DateStart,DateEnd):
+    
+        # Convert DateStart and DateEnd to datetime objects
+        start_date = datetime.strptime(DateStart, "%Y-%m-%d %H:%M:%S")
+        end_date = datetime.strptime(DateEnd, "%Y-%m-%d %H:%M:%S")
+        
+        # Add 2 hours to both start and end dates
+        start_date_widened = start_date - timedelta(hours=5)  # Subtract 2 hours from start
+        end_date_widened = end_date + timedelta(hours=5)      # Add 2 hours to end
+        
+        # Convert both dates to ISO 8601 format with 'Z' for UTC
+        start_date_iso = start_date_widened.strftime("%Y-%m-%dT%H:%M:%SZ")
+        new_end_date_iso = end_date_widened.strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        # Construct the datetime parameter
+        datetime_param = f"{start_date_iso}/{new_end_date_iso}"
+            
+                 
+        api_key = '7b168805-e8a3-4330-96e3-f9aa799c8420' 
+        
+    
+         
+        # Define the API endpoint and query parameters
+        url = 'https://dmigw.govcloud.dk/v2/metObs/collections/observation/items?'
+        params = {
+            'parameterId':'temp_mean_past1h', # Parameter to fetch                   
+            'stationId': '06108',  # Station 
+            'limit': 20000,                   # Max fetch
+            'datetime':datetime_param, # Example'2025-01-12T00:00:00Z/2025-02-18T00:00:00Z',
+            'api-key': api_key                # API key
+        }
+        
+        # Send a GET request to the API
+        response = requests.get(url, params=params)
+        data = response.json()
+        
+        features = data.get('features', [])
+        
+        # Create a DataFrame from the features
+        data_temp = pd.DataFrame([
+             {'timestamp': feature['properties']['observed'],  # Timestamp
+             'temperature': feature['properties']['value']   # Temperature value
+             }
+             for feature in features
+         ])
+        
+        
+        # Convert timestamp to datetime 
+        data_temp['timestamp'] = pd.to_datetime(data_temp['timestamp']).dt.tz_convert('CET')
+        data_temp['timestamp'] = data_temp['timestamp'].dt.tz_localize(None)
+        
+        return data_temp
+    
+    temp = fetch_temperature(DateStart,DateEnd)
+    
+    # Define constants
+    max_demand = 20
+    min_demand = 5
+    min_temp = -5    # Temperature corresponding to max demand
+    max_temp = 25    # Temperature corresponding to min demand
+    
+    # Calculate demand based on temperature
+    temp['Heat_Demand'] = (max_demand - ((temp['temperature'] - min_temp) / (max_temp - min_temp)) * (max_demand - min_demand)).clip(lower=min_demand, upper=max_demand)
+    temp.set_index('timestamp', inplace=True)        
+            
+    #COP
+    max_cop = 5
+    min_cop = 3
+    min_cop_temp = -5    # Temperature corresponding to max demand
+    max_cop_temp = 25    # Temperature corresponding to min demand    
 
-    TimeSeries['COP_factor'] = 1
+    temp['COP'] = (max_cop - ((temp['temperature'] - max_cop_temp) / (min_cop_temp - max_cop_temp)) * (max_cop - min_cop)).clip(lower=min_cop, upper=max_cop)
+    temp['cop_factor'] = (-0.0008*temp['temperature']**2 + 0.0176*temp['temperature']+0.966).clip(upper = 1.07)
+    TimeSeries = TimeSeries.merge(temp, how='left', left_index=True, right_index=True)
     
     return TimeSeries   
     
@@ -121,7 +248,7 @@ def Bid_builder(df, tSet):
 
     # Number of bins and bin edges for Elspot
     num_bins = 10
-    elspot_bins = np.round(np.linspace(-500, 4000, num_bins),0)
+    elspot_bins = np.round(np.linspace(-500, 5000, num_bins),0)
     
     
     # Create a DataFrame for binning Elspot values

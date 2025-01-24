@@ -143,8 +143,6 @@ class plan_optimizer:
         anc_service_vars = {}        
         pql_vars = {}
         
-        # Adder for investement
-        invest_limt = Setup['max_invest_size']
         
         #Calcualtions and lookups for speed performance
         loadPoints = {   
@@ -182,8 +180,8 @@ class plan_optimizer:
                 Condens =  self.model.add_variable(lb=0, ub= loadPoints[('qMax','ub')] * pqlData.loc['Cv-line'].max(), name=f"Condens_{unit}_{t}")  
                 Bypass = self.model.add_variable(lb=0, ub= loadPoints[('pMax','ub')] * pqlData.loc['Bypass'].max(), name=f"Bypass_{unit}_{t}")
                 qCosts =  self.model.add_variable(lb=0, ub=float('inf'), name=f"qCosts_{unit}_{t}")
-                fCosts =  self.model.add_variable(lb=0, ub=float('inf'), name=f"fCosts_{unit}_{t}")
-
+                fCosts =  self.model.add_variable(lb=float('-inf'), ub=float('inf'), name=f"fCosts_{unit}_{t}")
+                temp =  self.model.add_variable(lb=0, ub=float('inf'), name=f"temp_{unit}_{t}")
 
 
         ## -------- Builds "nested" variables (addional loop) ------------------------------------------------------------
@@ -203,7 +201,7 @@ class plan_optimizer:
                     "pLine": self.model.add_variable(lb=min(0, min(pqlData[pql]['pMax'], pqlData[pql]['pMin'])), ub=max(0, pqlData[pql]['pMax']), name=f"pLine_{unit}_{t}_{pql}"),
                     "pPOT": self.model.add_variable(lb=float('-inf'), ub=float('inf'),name=f"pPOT_{unit}_{t}_{pql}"),
                     "qLine": self.model.add_variable( lb=0, ub=pqlData[pql]['qMax'],name=f"qLine_{unit}_{t}_{pql}") if unit != "Battery" else None,
-                    "fLine": self.model.add_variable( lb=0, ub=pqlData[pql]['fMax'],name=f"fLine_{unit}_{t}_{pql}") if unit != "Battery" else None,       
+                    "fLine": self.model.add_variable( lb=0, ub=pqlData[pql]['fMax'],name=f"fLine_{unit}_{t}_{pql}") if unit != "Battery" else None,
                 }
             
  
@@ -221,6 +219,7 @@ class plan_optimizer:
               "fNet": fNet if unit != "Battery" else None,
               "qCosts": qCosts if unit != "Battery" else None,
               "fCosts": fCosts if unit != "Battery" else None,             
+              "temp": temp if unit != "Battery" else None, 
               "Bypass": Bypass if unit != "Battery" else None,
               "Condens": Condens if unit != "Battery" else None,
               "eNet": eNet if unit == "Battery" else None,
@@ -289,6 +288,10 @@ class plan_optimizer:
                 self.model.add_linear_constraint(
                     sum(unit_vars_pql[pql]["fLine"] for pql in pqlData) == unit_vars["fNet"],
                     name=f"{unit}_cts_fNet_{t}")
+                
+                self.model.add_linear_constraint(
+                    sum(pqlData[pql]["Temperature"] * (unit_vars_pql[pql]["qLine"] + unit_vars["Bypass"] - unit_vars["Condens"] * pqlData.loc['Cv-line'].max()) for pql in pqlData) == unit_vars["temp"],
+                    name=f"{unit}_cts_temp_{t}")
                 
                 self.model.add_linear_constraint(
                     unit_vars["pNet"] * pqlData.loc['direction'].max() >= unit_vars["on"] * pqlData.loc['pMin',:].min(),
@@ -451,16 +454,13 @@ class plan_optimizer:
         # Initialize variables for each timestep
         Storage_vars = {}
         
-        #Investment
-        invest_max_energy = qStorage.Storage['max_storage_size'] if qStorage.Storage['Invest'] == "Yes" else 0
-        invest_max_capacity = qStorage.Storage['max_capacity_size'] if qStorage.Storage['Invest'] == "Yes" else 0
         
         for t in self.sets['t']:  # Loop over timesteps
               
         # Create variables for each timestep for the current unit
-            storage = self.model.add_variable(lb=0, ub=int(qStorage.loc['StorageSize_MWh'] + invest_max_energy), name=f"storage_{t}") 
-            charge  =  self.model.add_variable(lb=0, ub=int(qStorage.loc['Charge_MW'] + invest_max_capacity), name=f"charge_{t}")
-            discharge  =  self.model.add_variable(lb=0, ub=int(qStorage.loc['Discharge_MW'] + invest_max_capacity), name=f"discharge_{t}")
+            storage = self.model.add_variable(lb=0, ub=int(qStorage.loc['StorageSize_MWh']), name=f"storage_{t}") 
+            charge  =  self.model.add_variable(lb=0, ub=int(qStorage.loc['Charge_MW']), name=f"charge_{t}")
+            discharge  =  self.model.add_variable(lb=0, ub=int(qStorage.loc['Discharge_MW']), name=f"discharge_{t}")
             
             # Stores all the data
             Storage_vars[t] = {
@@ -478,10 +478,15 @@ class plan_optimizer:
             self.model.add_linear_constraint(
                 float(self.data['timeSeries']['Heat_Demand'][t]) == sum(self.var[unit][t]["qNet"] for unit in self.sets['plants']) + self.var['storage_vars'][t]["discharge"] -  self.var['storage_vars'][t]["charge"],  
                 name=f"cts_HeatBalance_{t}")      
+            
+            ## Temperature restriktions
+            self.model.add_linear_constraint(
+                float(self.data['timeSeries']['Heat_Demand'][t])* 70 <= sum(self.var[unit][t]["temp"] for unit in self.sets['plants']) + 80 *self.var['storage_vars'][t]["discharge"] - 90 *self.var['storage_vars'][t]["charge"],  
+                name=f"cts_temperature_{t}")    
 
             ## Ensures room in thermal storage to do the regulations
             self.model.add_linear_constraint(
-                self.var['storage_vars'][t]["storage"] <= int(qStorage.loc['StorageSize_MWh'] + invest_max_energy) 
+                self.var['storage_vars'][t]["storage"] <= int(qStorage.loc['StorageSize_MWh']) 
                 - sum(sum(self.var[unit][t]["ancServices"][anc] for unit in self.sets['plants']) * self.data['ancService']['Up'][anc] * self.data['ancService']['EnergyReservation'][anc] for anc in self.sets['anc']),
                 name=f"storageRegUp_t{t}")
 
@@ -682,8 +687,8 @@ class plan_optimizer:
                     data_dict[t][u + '.Q'] = result_values.get(f'qNet_{u}_{timestamp_str}', None)
                     data_dict[t][u + '.bypass'] = result_values.get(f'Bypass_{u}_{timestamp_str}', None)
                     data_dict[t][u + '.Condens'] =  result_values.get(f'Condens_{u}_{timestamp_str}', None)    
-                    data_dict[t][u + '.F'] =  result_values.get(f'fNet_{u}_{timestamp_str}', None)                 
-
+                    data_dict[t][u + '.F'] =  result_values.get(f'fNet_{u}_{timestamp_str}', None)
+                    data_dict[t][u + '.temp'] =  result_values.get(f'temp{u}_{timestamp_str}', None)
                 for AncS in self.sets['anc']:
                     data_dict[t][u + '.' + AncS] = result_values.get(f'ancService_{u}_{AncS}_{timestamp_str}', None)    
                     
