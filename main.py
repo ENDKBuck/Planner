@@ -19,6 +19,7 @@ from Helper_functions import *
 from EDS_extract import *
 from plotter import *
 
+
 #Reads Excel
 wb = xw.Book('Dispatcher_all.xlsm')             
 
@@ -109,19 +110,18 @@ print('\nTotal costs, MDKK =', df.TotalCost.sum())
 # Ends Clock
 tic.toc()   
 
-#%% Data to Excel        
+# Data to Excel        
 ws = wb.sheets["Results"]
 ws.name = "Results"
 ws.clear_contents()
 ws.range("A1").value = df
 
-#%% DA BID to excel
+# DA BID to excel
 ws = wb.sheets["DA Bidder"]
 df_bud_matrix = Bid_builder(df, tSet)
 ws.range("A16").value = df_bud_matrix
 
-#%% creates html figures
-
+# creates html figures
 Plotter(df, aSet, TimeSeries, Setup)
 Plotter_DH(df, aSet, TimeSeries, Setup)
 Plotter_battery(df,ancServices, aSet, TimeSeries, Setup)

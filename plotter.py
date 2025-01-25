@@ -58,32 +58,51 @@ def Plotter(df,aSet,TimeSeries,Setup):
     x   = TimeSeries.index
     
     fig = make_subplots(
-    rows=len(aSet),  # Number of rows equals the length of aSet
+    rows=len(aSet)+1,  # Add an extra row for the bar chart
     cols=1,
-    specs=[[{"secondary_y": True}] for _ in range(len(aSet))],  # Create specs dynamically for each row
-    subplot_titles=aSet,
+    specs=[[{"type": "xy"}]] + [[{"secondary_y": True}] for _ in range(len(aSet))],  # Use 'xy' for the bar chart row
+    subplot_titles=['Ancillary Services'] + aSet,  # Title for the bar chart + the ancillary services plots
     vertical_spacing=0.05)
-     
+
+
+
     ActiveUnits = Setup.columns
     plotList = ActiveUnits
-        
+    
+    ancillary_sums = {}
+    for anc in aSet:
+        ancillary_sums[anc] = sum([df[u + '.' + anc].sum() for u in uSet])  # Sum over all ancillary services for each unit    
+    
+    # Stacked bar chart for ancillary services
+    fig.add_trace(go.Bar(y=list(ancillary_sums.keys()),x=list(ancillary_sums.values()), orientation='h', name="Sum sold Ancillary Services", marker=dict(color='khaki'),showlegend=False),row=1, col=1)
         
     for u in ActiveUnits:
         for num,ancs in enumerate(aSet):
-            fig.add_trace(go.Scatter(x=x, y=df[u+'.'+ancs], hoverinfo='x+y',mode='lines',line=dict(shape='hv'),line_color=Setup[u].plotColor, name=u+'-'+ancs,legendgroup='P'+u,legendgrouptitle_text="Sold Ancillary services", stackgroup='one'),row=num+1,col=1) 
+            fig.add_trace(go.Scatter(x=x, y=df[u+'.'+ancs], hoverinfo='x+y',mode='lines',line=dict(shape='hv'),line_color=Setup[u].plotColor, name=u,legendgroup='anc', legendgrouptitle_text="Sold Ancillary Services", stackgroup='one',showlegend=(num == 0)),row=num+2,col=1) 
     
     
     for num,ancs in enumerate(aSet):        
-            fig.add_trace(go.Scatter(x=x, y=df['Elspot'], hoverinfo='x+y',mode='lines',line=dict(shape='hv'), name='Elspot',line_color='black',legendgroup='Elspot',showlegend = True if num == 0 else False),secondary_y=True,row=num+1,col=1)    
-            fig.add_trace(go.Scatter(x=x, y=TimeSeries[ancs+'_Price'], hoverinfo='x+y',mode='lines',line=dict(shape='hv'), name=ancs+"-Price",line_color='blue',legendgroup='Elspot',legendgrouptitle_text="Prices"),secondary_y=True,row=num+1,col=1)    
+            fig.add_trace(go.Scatter(x=x, y=df['Elspot'], hoverinfo='x+y',mode='lines',line=dict(shape='hv'), name='Elspot',line_color='black',legendgroup='Elspot',showlegend = True if num == 0 else False),secondary_y=True,row=num+2,col=1)    
+            fig.add_trace(go.Scatter(x=x, y=TimeSeries[ancs+'_Price'], hoverinfo='x+y',mode='lines',line=dict(shape='hv'), name=ancs+"-Price",line_color='blue',legendgroup='Elspot',legendgrouptitle_text="Prices"),secondary_y=True,row=num+2,col=1)    
              
     
+    # Update axes and layout
     fig.update_xaxes(title_text='')
     fig.update_yaxes(title_text='MW/h')
     fig.update_yaxes(title_text="kr./MW/h", secondary_y=True)
-    fig.update_traces(marker_size=10)
-    fig.update_layout(legend=dict(groupclick="toggleitem"),autosize=True,height=2000)
+    
+    # Update all traces (except pie chart) to have a marker size
+    #fig.update_traces(marker=dict(size=10))  # Adjust marker size for all traces
+    
+    # Layout adjustments
+    fig.update_layout(
+        legend=dict(groupclick="toggleitem"),
+        autosize=True,
+        height=2000)
+    
+    # Save and display the figure
     fig.write_html('Ancillary services.html', auto_open=True)
+
     
 
 def Plotter_battery(df,ancServices,aSet,TimeSeries,Setup):   
@@ -170,3 +189,6 @@ def plot_prices(TimeSeries,aSet):
     fig.update_traces(marker_size=10)
     fig.update_layout(template="ggplot2",legend=dict(groupclick="toggleitem"))
     fig.write_html('prices.html', auto_open=True)
+    
+    
+

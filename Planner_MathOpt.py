@@ -58,7 +58,6 @@ class plan_optimizer:
 
         
         #Model params
- 
         self.params = mathopt.SolveParameters(enable_output=False, time_limit=timedelta(seconds=maxTime*60),relative_gap_tolerance = 0.01) 
         self.model = mathopt.Model(name="dispatcher")
         
@@ -71,11 +70,13 @@ class plan_optimizer:
         Solve the optimization model.
         """
         
+        # Solve the model
         self.result = mathopt.solve(self.model, mathopt.SolverType.HIGHS, params= self.params) #GSCIP;HIGHS;CP_SAT
         
         if self.result.termination.reason != mathopt.TerminationReason.OPTIMAL:
             raise RuntimeError(f"Model failed to solve: {self.result.termination}")
 
+        # Prints out of the solution
         print('Problem solved in',self.result.solve_time()) # To call outside use: optimizer.result.solve_time()            
         print('Objective value, MDKK =', self.result.objective_value()) # To call outside use: optimizer.result.objective_value()
         print('gap [%] =', (round(1 - self.result.objective_value() / self.result.dual_bound(), 4) * 100))
@@ -85,7 +86,6 @@ class plan_optimizer:
         Reads and interprets input data
         """
         
-        
         #Creates the sets  
         self.sets = {
             't': tSet,
@@ -94,7 +94,6 @@ class plan_optimizer:
             'plants': Setup.columns[Setup.loc['asset type'] == 'plant'].tolist()       
             }
            
-        
         
         #Creates the datasets
         self.data = {
@@ -126,7 +125,7 @@ class plan_optimizer:
             if unit == "Battery":
                 self.set_up_battery(self.data['timeSeries'], self.data['BatStorage'], self.data['df'], self.data['batch'], self.data['batchEnd'])
                 
-        # General constraints and objective
+        # General constraints (energy/heat/power) and objective
         self.set_up_energyBalance(self.data['timeSeries'], self.data['qStorage'], self.data['df'], self.data['batch'], self.data['batchEnd'])
         self.set_up_powerBalance(self.data['timeSeries'], self.data['df'], self.data['batch'], self.data['batchEnd'])
         self.set_up_objective_function()
@@ -163,7 +162,6 @@ class plan_optimizer:
             Unit_avaiablity = timeSeries[unit][t]
         
             ## -------- Builds variables  ------------------------------------------------------------
-
             # Create variables for each timestep for the current unit
             pNet = self.model.add_variable(lb = loadPoints[('pMin','lb')] * Unit_avaiablity, ub = loadPoints[('pMax','ub')] * Unit_avaiablity, name=f"pNet_{unit}_{t}") 
             totalCosts  =  self.model.add_variable(lb=float('-inf'), ub=float('inf'), name=f"totalCosts_{unit}_{t}")
@@ -185,7 +183,6 @@ class plan_optimizer:
 
 
         ## -------- Builds "nested" variables (addional loop) ------------------------------------------------------------
-            
             # Loop over ancillary services to create variabel
             anc_service_vars[t] = {}       
             for anc in self.sets['anc']:  
@@ -248,23 +245,28 @@ class plan_optimizer:
             
             ## Creates battery specific constraints
             if unit == "Battery":
+                
+                # From power to storage (eNet is what comes into the battery)
                 self.model.add_linear_constraint(
                     sum(unit_vars_pql[pql]["pLine"] * pqlData[pql]['eMax'] for pql in pqlData) == unit_vars["eNet"],
                     name=f"{unit}_cts_eNet_{t}")           
                 
+                # Sums Power from line segments to sum pNet for the battery
                 self.model.add_linear_constraint(
                     sum(unit_vars_pql[pql]["pLine"] for pql in pqlData) == unit_vars["pNet"],
                     name=f"{unit}_cts_pNet_{t}")
-  
+                
+                # Total cost for the battery   
                 self.model.add_linear_constraint(
                     unit_vars['totalCosts']  == unit_vars['pCosts'] + unit_vars['start'] * Setup['startCosts'], 
                     name=f"{unit}_cts_totCosts_{t}")
-                               
+
+                # Power related costs for the battery (elspot + pMC)                                
                 self.model.add_linear_constraint(
                     unit_vars['pCosts'] ==  - unit_vars["pNet"] * timeSeries['Elspot'][t] + sum(unit_vars_pql[pql]["pPOT"] for pql in pqlData),
                     name=f"{unit}_cts_pCosts_{t}")                
 
-                #This constraint tries to ties up all NEM capacities:
+                #This constraint ties up all NEM capacities to limit avaiable bidding:
                 self.model.add_linear_constraint(
                     sum(unit_vars["ancServices"][AncS] * self.data['ancService']['Up'][AncS] * (1 + self.data['ancService']['NEM'][AncS]) for AncS in self.sets['anc']) <=  loadPoints[('pMax','ub')] - unit_vars["pNet"], 
                     name=f"{unit}_cts_ancMaxUp_{t}")
@@ -277,63 +279,78 @@ class plan_optimizer:
             
             ## Creates thermal plant specific constraints
             else:
+                
+                # Sums the heat from all lines + bypass - condens to get the net heat 
                 self.model.add_linear_constraint(
                     sum(unit_vars_pql[pql]["qLine"] for pql in pqlData) + unit_vars["Bypass"] - unit_vars["Condens"] * pqlData.loc['Cv-line'].max() == unit_vars["qNet"],
                     name=f"{unit}_cts_qNet_{t}")
-                
+
+                # Sums the power from all lines - bypass + condens to get the net power                 
                 self.model.add_linear_constraint(
                     sum(unit_vars_pql[pql]["pLine"] for pql in pqlData) - unit_vars["Bypass"] + unit_vars["Condens"] == unit_vars["pNet"],
                     name=f"{unit}_cts_pNet_{t}")
-                
+
+                # Sums the fuel from all lines to get the net fuel                   
                 self.model.add_linear_constraint(
                     sum(unit_vars_pql[pql]["fLine"] for pql in pqlData) == unit_vars["fNet"],
                     name=f"{unit}_cts_fNet_{t}")
-                
+
+                # Sum heat and multiplies with temperature to get [degree*MWh] used for temperature constraint                    
                 self.model.add_linear_constraint(
                     sum(pqlData[pql]["Temperature"] * (unit_vars_pql[pql]["qLine"] + unit_vars["Bypass"] - unit_vars["Condens"] * pqlData.loc['Cv-line'].max()) for pql in pqlData) == unit_vars["temp"],
                     name=f"{unit}_cts_temp_{t}")
-                
+
+                # Ensures that the plant is on if the net power is above the minimum power                
                 self.model.add_linear_constraint(
                     unit_vars["pNet"] * pqlData.loc['direction'].max() >= unit_vars["on"] * pqlData.loc['pMin',:].min(),
                     name=f"{unit}_cts_Bypass_{t}")
 
+                # Creates the total cost for the plant  
                 self.model.add_linear_constraint(
                     unit_vars['totalCosts']  == unit_vars['pCosts'] + unit_vars['fCosts'] + unit_vars['qCosts'] + unit_vars['start'] * Setup['startCosts'], 
                     name=f"{unit}_cts_totCosts_{t}")              
-                
+ 
+                # Creates the power related cost for the plant (or revenue)                 
                 self.model.add_linear_constraint(
                     unit_vars['pCosts'] ==  - unit_vars["pNet"] * timeSeries['Elspot'][t]+ sum(unit_vars_pql[pql]["pPOT"] for pql in pqlData),
                     name=f"{unit}_cts_pCosts_{t}")
-                
+ 
+                # Creates the q(heat) related cost for the plant                
                 self.model.add_linear_constraint(
                     unit_vars['qCosts'] == sum((unit_vars_pql[pql]["qLine"] + unit_vars["Bypass"] - unit_vars["Condens"] * pqlData[pql]['Cv-line']) * pqlData[pql]['qMC'] for pql in pqlData), 
                     name=f"{unit}_cts_qCosts_{t}") 
-    
+  
+                # Creates the fuel related cost for the plant   
                 self.model.add_linear_constraint(
                     unit_vars['fCosts'] == sum(unit_vars_pql[pql]["fLine"] * pqlData[pql]['fMC'] for pql in pqlData),
                     name=f"{unit}_cts_fCosts_{t}")  
 
 
 
-            ## Generic Constraints for all unit types          
+            ## Generic Constraints for all unit types
+            
+            # Can only be on if the plant is started          
             self.model.add_linear_constraint(
                 unit_vars["on"] == sum(unit_vars_pql[pql]['PQLine'] for pql in pqlData),
                 name=f"{unit}_cts_on_{t}")
 
+            # Reservates capacity if the plant sell ancillary services in downwards direction
             self.model.add_linear_constraint(
                 unit_vars["pNet"] >=  loadPoints[('pMin','lb')] + max(pqlData.loc['pMin',:].min(),0) * unit_vars["on"] + sum(unit_vars["ancServices"][anc] * self.data['ancService']['Dwn'][anc] for anc in self.sets['anc']),
                 name=f"{unit}_cts_downReg_{t}")  
             
-            #Appararently what works if no ancillary services are provided. 
+            # Reservates capacity if the plant sell ancillary services in upwards direction
             if self.sets['anc']:
                 self.model.add_linear_constraint(
                 unit_vars["pNet"]  <= loadPoints[('pMax','ub')] * Unit_avaiablity - sum(unit_vars["ancServices"][anc] *self.data['ancService']['Up'][anc] for anc in self.sets['anc']),
                 name=f"{unit}_cts_upReg_{t}")
 
+            # creates the ancillary revenue for the plant
             self.model.add_linear_constraint(
                 unit_vars["ancRevenue"] ==  sum(unit_vars["ancServices"][anc]  * (timeSeries[anc+'_Price'][t] - self.data['ancService']['LoadFactor'][anc] * pqlData.loc['Ancillary service cost'].max())  for anc in self.sets['anc']),
                 name=f"{unit}_cts_ASRevenue_{t}")        
 
+            # If the ancillary service require operation, the plant must be on
             for anc in self.sets['anc']:
                   self.model.add_linear_constraint(
                       unit_vars["ancServices"][anc] * self.data['ancService']['Running'][anc] <=  unit_vars["on"] * (loadPoints[('pAbs')] * ancService[anc]),
@@ -344,44 +361,48 @@ class plan_optimizer:
              ## Time dependent constraints
             if t > self.sets['t'][0]:        
                 
-                #prior timestep
+                # Calling prior timestep
                 t_0 = self.sets['t'][self.sets['t'].index(t) - 1]
-                
+
+                # Rampings constraint up - a bit complicated due to direction (consumption or production) and ramping is different per line-segement               
                 self.model.add_linear_constraint(
                       sum(unit_vars_pql[pql]["pLine"] * pqlData[pql]['direction'] for pql in pqlData) - sum(self.var[unit][t_0]['pql'][pql]["pLine"]  * pqlData[pql]['direction'] for pql in pqlData)
                       <=   sum(unit_vars_pql[pql]['PQLine'] * (pqlData[pql]['RampUp'] - pqlData.loc['RampUp'].min()) for pql in pqlData) *  Unit_avaiablity +  pqlData.loc['RampUp'].min(),
                       name=f"{unit}_cts_pHourRampUp_{t}")
-    
+
+                # Ramping comnstraint down    
                 self.model.add_linear_constraint(
                     sum(-unit_vars_pql[pql]["pLine"] * pqlData[pql]['direction'] for pql in pqlData) + sum(self.var[unit][t_0]['pql'][pql]["pLine"]  * pqlData[pql]['direction'] for pql in pqlData)
                     <= sum(unit_vars_pql[pql]['PQLine'] * (pqlData[pql]['RampDown']  -  pqlData.loc['RampDown'].min()) for pql in pqlData) * Unit_avaiablity + pqlData.loc['RampDown'].min(),
                       name=f"{unit}_cts_pHourRampDw_{t}")      
             
-                 
+                #  Start constraint
                 self.model.add_linear_constraint(
                     unit_vars["start"]  >=  unit_vars["on"]  - self.var[unit][t_0]["on"] ,
                     name=f"{unit}_cts_start_{t}")
                 
-
+            #  Start constraint where it needs to fetch data from earlyer batch (calculation)
             elif (t == self.sets['t'][0]) and (self.data['batch'] >0):
                 
+                # Rampings constraint up 
                 self.model.add_linear_constraint(
                     sum(unit_vars_pql[pql]["pLine"] * pqlData[pql]['direction'] for pql in pqlData ) - df[unit+'.P'].iloc[-1]
                     <=  sum(unit_vars_pql[pql]['PQLine'] * (pqlData[pql]['RampUp']  - pqlData.loc['RampUp'].min()) for pql in pqlData)  *   Unit_avaiablity +  pqlData.loc['RampUp'].min(), 
                     name=f"{unit}_cts_pHourRampUp_{t}")
-
+                # Rampions constraint down
                 self.model.add_linear_constraint(
                     - sum(unit_vars_pql[pql]["pLine"] * pqlData[pql]['direction']for pql in pqlData) + df[unit+'.P'].iloc[-1]
                     <=   sum(unit_vars_pql[pql]['PQLine'] * (pqlData[pql]['RampDown'] - pqlData.loc['RampDown'].min()) for pql in pqlData) *  Unit_avaiablity + pqlData.loc['RampDown'].min(), 
                     name=f"{unit}_cts_pHourRampDw_{t}")      
                 
+                #  Start constraint
                 self.model.add_linear_constraint(
                     unit_vars["start"] >=  unit_vars["on"]  - df[unit+'.On'].iloc[-1],
                     name=f"{unit}_cts_start_{t}")
             
             
             
-            #extracts the hour (format dd-mm-yyyy hh:mm)
+            # Makes the FCR service to be 4h blocks
             if "FCR" in self.sets['anc']:
                 hour = t.hour
                 if hour % 4 == 0:
@@ -406,14 +427,18 @@ class plan_optimizer:
             
                 # Battery specific pql constraints
                 if unit == "Battery":
+                    
+                    # Creates the pCosts for the battery per line segment
                     self.model.add_linear_constraint(
                         unit_vars_pql[pql]["pPOT"] == unit_vars_pql[pql]["pLine"] * direction * (pql_lookup['pMC'] + tariff_consumption),
                         name=f"{unit}_cts_pPOT_{t}_{pql}")
-                    
+
+                    # Ensures pMin for the line segement                    
                     self.model.add_linear_constraint(
                         unit_vars_pql[pql]["pLine"] >= unit_vars_pql[pql]["PQLine"] * pql_lookup['pMin'],
                         name=f"{unit}_cts_pLineMin_{t}_{pql}")
                     
+                    # Ensures pMax for the line segement                         
                     self.model.add_linear_constraint(
                         unit_vars_pql[pql]["pLine"] <= unit_vars_pql[pql]["PQLine"] * pql_lookup['pMax'],
                         name=f"{unit}_cts_pLineMax_{t}_{pql}")
@@ -423,22 +448,27 @@ class plan_optimizer:
                 # Thermal plant specific pql constraints
                 else:
                     if pql_lookup['qMin'] > 0:
+                        # Creates the backpressure relation (power/heat) for the line segment from which it can deviate with condensation/bypass
                         self.model.add_linear_constraint(
                             unit_vars_pql[pql]["pLine"] == (unit_vars_pql[pql]["qLine"] * pql_lookup['a_qp'] + unit_vars_pql[pql]["PQLine"] * pql_lookup['b_qp'])/Unit_avaiablity,
                             name=f"{unit}_cts_pLine_{t}_{pql}")
-                    
+ 
+                     # Ensures qMin for the line segement                        
                     self.model.add_linear_constraint(
                         unit_vars_pql[pql]["qLine"] >= unit_vars_pql[pql]["PQLine"] * pql_lookup['qMin'],
                         name=f"{unit}_cts_qLineMin_{t}_{pql}")
                     
+                    # Ensures qMax for the line segement     
                     self.model.add_linear_constraint(
                         unit_vars_pql[pql]["qLine"] <= unit_vars_pql[pql]["PQLine"] * pql_lookup['qMax'],
                         name=f"{unit}_cts_qLineMax_{t}_{pql}")
                     
+                    # Ensures fuel relation for the line segement     
                     self.model.add_linear_constraint(
                         unit_vars_pql[pql]["fLine"] == (unit_vars_pql[pql]["qLine"] * pql_lookup['a_qf'] + unit_vars_pql[pql]["PQLine"] * pql_lookup['b_qf']), 
                         name=f"{unit}_cts_fLine_{t}_{pql}")
                     
+                    # Makes the power related costs for the line segment taking into account bypass (- power) and condensation (+ power)
                     self.model.add_linear_constraint(
                         unit_vars_pql[pql]["pPOT"] == (unit_vars_pql[pql]["pLine"] * direction - unit_vars["Bypass"] + unit_vars["Condens"]) 
                         * (pqlData[pql]['pMC'] + tariff_consumption),
@@ -474,40 +504,46 @@ class plan_optimizer:
 
 
         for t in self.sets['t']:  # Loop over timesteps    
-        
+
+            ## Heat demand constraint - ensures energy 
             self.model.add_linear_constraint(
                 float(self.data['timeSeries']['Heat_Demand'][t]) == sum(self.var[unit][t]["qNet"] for unit in self.sets['plants']) + self.var['storage_vars'][t]["discharge"] -  self.var['storage_vars'][t]["charge"],  
                 name=f"cts_HeatBalance_{t}")      
             
-            ## Temperature restriktions
+            ## Temperature constraint - ensures high temperature
             self.model.add_linear_constraint(
                 float(self.data['timeSeries']['Heat_Demand'][t])* 70 <= sum(self.var[unit][t]["temp"] for unit in self.sets['plants']) + 80 *self.var['storage_vars'][t]["discharge"] - 90 *self.var['storage_vars'][t]["charge"],  
                 name=f"cts_temperature_{t}")    
 
-            ## Ensures room in thermal storage to do the regulations
+            # Ensures there is room in the storage to absorb upregulation
             self.model.add_linear_constraint(
                 self.var['storage_vars'][t]["storage"] <= int(qStorage.loc['StorageSize_MWh']) 
                 - sum(sum(self.var[unit][t]["ancServices"][anc] for unit in self.sets['plants']) * self.data['ancService']['Up'][anc] * self.data['ancService']['EnergyReservation'][anc] for anc in self.sets['anc']),
                 name=f"storageRegUp_t{t}")
 
+            # Ensures there is room in the storage to absorb downregulation
             self.model.add_linear_constraint(
                 self.var['storage_vars'][t]["storage"] >= sum(sum(self.var[unit][t]["ancServices"][anc] for unit in self.sets['plants']) * self.data['ancService']['Dwn'][anc] * self.data['ancService']['EnergyReservation'][anc] for anc in self.sets['anc']),
                 name=f"storageRegdw_t{t}")
                                                     
-
+            # Time related constraints
             if (t == self.sets['t'][0]) and (self.data['batch'] == 0):
-            
+
+                # if timestep = 0, then initial storage value is to be set           
                 self.model.add_linear_constraint(
                     self.var['storage_vars'][t]["storage"] == int(qStorage.loc['iniStorage_MWh']) - self.var['storage_vars'][t]["discharge"] +  self.var['storage_vars'][t]["charge"],  
                     name=f"StorageBal_{t}")
-                
+ 
+            # if timestep = 0, but earlier calculation is present                 
             elif (t == self.sets['t'][0]) and (self.data['batch'] > 0):
-             
+                
+                # Change from storage value from previous batch 
                 self.model.add_linear_constraint(
                     self.var['storage_vars'][t]["storage"] == df.Storage.iloc[-1] - self.var['storage_vars'][t]["discharge"] +  self.var['storage_vars'][t]["charge"],  
                     name=f"StorageBal_{t}")
                                    
             else:
+                # Change from storage value from previous timestep
                 t_0 = self.sets['t'][self.sets['t'].index(t) - 1]                
                 self.model.add_linear_constraint(
                     self.var['storage_vars'][t]["storage"] == self.var['storage_vars'][t_0]["storage"] - self.var['storage_vars'][t]["discharge"] +  self.var['storage_vars'][t]["charge"],  
@@ -533,7 +569,8 @@ class plan_optimizer:
             socCost  =  self.model.add_variable(lb=0, ub= float('inf'), name=f"socCost_{t}")
             
             soc_segment_vars = {}  
-            for seg in socSets:                
+            for seg in socSets:  
+                              
                 # Create binary variable to indicate whether the soc segment is active
                 soc_segment_vars[seg] = self.model.add_binary_variable(name=f"soc_{seg}_{t}")
             
@@ -578,8 +615,7 @@ class plan_optimizer:
                 self.model.add_linear_constraint(
                     self.var['battery_vars'][t]['soc'] >= bat_storage_var['Initial Storage'],  
                     name=f"cts_socEnd_{t}")     
-                
-            
+                          
             # Ensures energy content to absorb downregulation 
             self.model.add_linear_constraint(
                 self.var['battery_vars'][t]['soc'] <= bat_storage_var['Energy Storage'] - sum(bat_vars["ancServices"][anc] * self.data['ancService']['Dwn'][anc] * self.data['ancService']['EnergyReservation'][anc] for anc in self.sets['anc']),
@@ -591,7 +627,7 @@ class plan_optimizer:
                 name=f"cts_batStorageRegUp.t{t}")   
                       
              
-            #TODO: Check if this is to be rewritting - sum? or just loop the segs?        
+            #Creates the battery segment constraints for the SoC     
             self.model.add_linear_constraint(
                 self.var['battery_vars'][t]['soc'] <= sum(self.var['battery_vars'][t]['socSeg'][seg] * BatStorage["upper"][seg] * bat_storage_var['Energy Storage'] for seg in socSets), name=f"cts_socReqMax_{t}_{seg}")
             
@@ -599,7 +635,7 @@ class plan_optimizer:
                 self.var['battery_vars'][t]['soc'] >= sum(self.var['battery_vars'][t]['socSeg'][seg] * BatStorage["lower"][seg] * bat_storage_var['Energy Storage'] for seg in socSets), name=f"cts_socReqMin_{t}_{seg}")
                                                      
             
-            # Hourly costs
+            # The battery SoC degradation costs
             self.model.add_linear_constraint(
                 self.var['battery_vars'][t]['socCost'] == sum( self.var['battery_vars'][t]['socSeg'][seg]  * BatStorage["cost"][seg] for seg in socSets),
                 name=f"cts_socCost_{t}")                       
@@ -610,7 +646,7 @@ class plan_optimizer:
         r"""
         Builds power/ancillary service constraints
         """
-               
+        # If FRR is in the ancillary services, then the amount sold cannot exceed the purchased amount          
         if "FFR" in self.sets['anc']:
             for t in self.sets['t']: 
                 self.model.add_linear_constraint(
@@ -618,7 +654,7 @@ class plan_optimizer:
                     name=f"cts_FFRlimit_{t}") 
                         
 
-        # Creates the limits of sold capacity
+        # If some services is already provided (obligated) then the plant must provide the service - needed due to chronological clearing
         for ancs in self.sets['anc']:
             if self.data['soldCapacity'][ancs].any() > 0:  
                 for t in self.sets['t']:
@@ -626,6 +662,7 @@ class plan_optimizer:
                         sum(self.var[unit][t]["ancServices"][anc] for unit in self.sets['units']) == self.data['soldCapacity'][ancs][t],
                         name=f"cts_soldCap_{ancs}_{t}") 
                     
+        # If there is DA obligations to consider   
         if self.data['soldCapacity']["DA"].any() > 0:  
                 for t in self.sets['t']:
                     self.model.add_linear_constraint(
@@ -635,11 +672,11 @@ class plan_optimizer:
             
     def set_up_objective_function(self):
         r"""
-        Bygger modellens objektfunktion.
+        Builds the objective for the optimization model.
         """
         print('Optimizing...')
         
-        
+        # Minize the total costs + if battery is present the SoC costs   
         self.model.minimize((sum(self.var[unit][t]['totalCosts'] - self.var[unit][t]['ancRevenue']
                             + (self.var['battery_vars'][t]['socCost'] if "Battery" in self.sets['units'] else 0) for t, unit in itertools.product(self.sets['t'], self.sets['units'])))/1e6)
                                        
