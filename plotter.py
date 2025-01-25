@@ -71,7 +71,7 @@ def Plotter(df,aSet,TimeSeries,Setup):
     
     ancillary_sums = {}
     for anc in aSet:
-        ancillary_sums[anc] = sum([df[u + '.' + anc].sum() for u in uSet])  # Sum over all ancillary services for each unit    
+        ancillary_sums[anc] = sum([df[u + '.' + anc].sum() for u in ActiveUnits])  # Sum over all ancillary services for each unit    
     
     # Stacked bar chart for ancillary services
     fig.add_trace(go.Bar(y=list(ancillary_sums.keys()),x=list(ancillary_sums.values()), orientation='h', name="Sum sold Ancillary Services", marker=dict(color='khaki'),showlegend=False),row=1, col=1)
