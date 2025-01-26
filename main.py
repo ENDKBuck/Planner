@@ -8,6 +8,7 @@ Created on Sat Apr 27 07:45:06 2024
 # Standard modules
 import pandas as pd
 from datetime import timedelta 
+import pickle
 
 #Installed modules
 import xlwings as xw
@@ -109,6 +110,12 @@ print('\nTotal costs, MDKK =', df.TotalCost.sum())
 
 # Ends Clock
 tic.toc()   
+
+# Stores as python-pickle
+data = (df, TimeSeries, aSet,ancServices, Setup,BatStorage,qStorage,pqlData,loop_soldCap,uSet)
+with open('data.pickle', 'wb') as f:
+    pickle.dump(data, f)
+
 
 # Data to Excel        
 ws = wb.sheets["Results"]

@@ -126,7 +126,8 @@ class plan_optimizer:
                 self.set_up_battery(self.data['timeSeries'], self.data['BatStorage'], self.data['df'], self.data['batch'], self.data['batchEnd'])
                 
         # General constraints (energy/heat/power) and objective
-        self.set_up_energyBalance(self.data['timeSeries'], self.data['qStorage'], self.data['df'], self.data['batch'], self.data['batchEnd'])
+        if self.sets['plants']:
+            self.set_up_energyBalance(self.data['timeSeries'], self.data['qStorage'], self.data['df'], self.data['batch'], self.data['batchEnd'])
         self.set_up_powerBalance(self.data['timeSeries'], self.data['df'], self.data['batch'], self.data['batchEnd'])
         self.set_up_objective_function()
 
